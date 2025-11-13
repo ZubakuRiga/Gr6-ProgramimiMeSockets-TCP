@@ -70,6 +70,85 @@ void removeClient(SOCKET s)
                   clients.end());
     closesocket(s);
 }
+void clientThread(SOCKET clientSock, string clientIp, int clientPort)
+{
+    ClientInfo ci{clientSock, clientIp, clientPort, false, 0, 0, steady_clock::now()};
+    {
+        lock_guard<mutex> lock(clients_mtx);
+        clients.push_back(ci);
+    }
+
+    string header;
+    if (!recvLine(clientSock, header))
+    {
+        removeClient(clientSock);
+        return;
+    }
+    while (!header.empty() && (header.back() == '\n' || header.back() == '\r'))
+        header.pop_back();
+    bool adminFlag = (header == "ROLE admin");
+    {
+        lock_guard<mutex> lock(clients_mtx);
+        for (auto &c : clients)
+            if (c.sock == clientSock)
+            {
+                c.isAdmin = adminFlag;
+                c.lastActive = steady_clock::now();
+            }
+    }
+    string welcome = "Welcome. Admin=" + string(adminFlag ? "yes\n" : "no\n");
+    sendAll(clientSock, welcome.c_str(), (int)welcome.size());
+
+    while (true)
+    {
+        {
+            lock_guard<mutex> lock(clients_mtx);
+            auto it = find_if(clients.begin(), clients.end(), [&](const ClientInfo &c)
+                              { return c.sock == clientSock; });
+            if (it == clients.end())
+                break;
+            auto dur = chrono::duration_cast<chrono::seconds>(steady_clock::now() - it->lastActive).count();
+            if (dur > TIMEOUT_SEC)
+            {
+                sendAll(clientSock, "Disconnected due to inactivity\n", 31);
+                removeClient(clientSock);
+                return;
+            }
+        }
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(clientSock, &readfds);
+        timeval tv{0, 500000};
+        int rv = select(0, &readfds, NULL, NULL, &tv);
+        if (rv == SOCKET_ERROR)
+        {
+            removeClient(clientSock);
+            return;
+        }
+        if (rv == 0)
+            continue;
+        string line;
+        if (!recvLine(clientSock, line))
+        {
+            removeClient(clientSock);
+            return;
+        }
+        {
+            lock_guard<mutex> lock(clients_mtx);
+            for (auto &c : clients)
+            {
+                if (c.sock == clientSock)
+                {
+                    c.messages++;
+                    c.lastActive = steady_clock::now();
+                    c.bytes += line.size();
+                    ci = c;
+                }
+            }
+        }
+        processCommand(ci, line);
+    }
+}
 
 int main()
 {
