@@ -344,7 +344,9 @@ int main()
         }
 
         cout << "New connection from " << cliIp << ":" << cliPort << "\n";
+        showHelp();
     }
+    
     closesocket(listenSock);
     WSACleanup();
     return 0;
