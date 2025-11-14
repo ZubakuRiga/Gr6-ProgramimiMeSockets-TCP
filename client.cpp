@@ -150,7 +150,85 @@ int main()
 
     thread(recvLoop, sock, isAdmin).detach();
 
-    cout << "Connected to server successfully!\n";
+    cout << "Komandat e disponueshme:\n";
+    cout << "/list\n/read <filename>\n/upload <filename>\n/download <filename>\n/delete <filename>\n/search <keyword>\n/info <filename>\nSTATS (admin)\n";
+    cout << "Shkruaj 'exit' për të dalë.\n";
+
+    while (running)
+    {
+        cout << "> ";
+        string line;
+        getline(cin, line);
+
+        if (!running)
+            break;
+        if (line.empty())
+            continue;
+        if (line == "exit")
+            break;
+
+        if (isAdmin && line.rfind("/upload ", 0) == 0)
+        {
+            istringstream iss(line);
+            string cmd, fname;
+            iss >> cmd >> fname;
+            if (fname.empty())
+            {
+                cout << "Usage: /upload <filename>\n";
+                continue;
+            }
+            if (!fs::exists(fname))
+            {
+                cout << "Local file not found\n";
+                continue;
+            }
+            uint64_t fsize = fs::file_size(fname);
+            string header = "/upload " + fs::path(fname).filename().string() + " " + to_string(fsize) + "\n";
+            if (!sendAll(sock, header.c_str(), (int)header.size()))
+                break;
+            ifstream f(fname, ios::binary);
+            char buf[BUFFER];
+            while (f)
+            {
+                f.read(buf, BUFFER);
+                streamsize r = f.gcount();
+                if (r > 0 && !sendAll(sock, buf, (int)r))
+                {
+                    cerr << "Send failed\n";
+                    break;
+                }
+            }
+            cout << "Upload sent.\n";
+            continue;
+        }
+
+        if (line.rfind("/download ", 0) == 0)
+        {
+            string out = line + "\n";
+            if (!sendAll(sock, out.c_str(), (int)out.size()))
+                break;
+            cout << "[Request sent for download]\n";
+            continue;
+        }
+
+        if (line == "STATS" && isAdmin)
+        {
+            if (!sendAll(sock, (line + "\n").c_str(), (int)line.size() + 1))
+                break;
+            continue;
+        }
+
+        if (line.rfind("/", 0) == 0 || (!isAdmin && line.rfind("/", 0) == 0))
+        {
+            string out = line + "\n";
+            if (!sendAll(sock, out.c_str(), (int)out.size()))
+                break;
+            continue;
+        }
+
+        string msg = line + "\n";
+        sendAll(sock, msg.c_str(), (int)msg.size());
+    }
 
     running = false;
     closesocket(sock);
