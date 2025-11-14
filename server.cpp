@@ -83,6 +83,21 @@ void removeClient(SOCKET s)
     closesocket(s);
 }
 
+bool updateClientStats(SOCKET s, function<void(ClientInfo&)> updater, ClientInfo& outCopy)
+{
+    lock_guard<mutex> lock(clients_mtx);
+    for (auto& c : clients)
+    {
+        if (c.sock == s)
+        {
+            updater(c);
+            outCopy = c;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool recvLine(SOCKET s, string& out)
 {
     out.clear();
@@ -141,6 +156,8 @@ void processCommand(ClientInfo& ci, const string& line) {
             sendAll(s, data.c_str(), (int)data.size());
             return;
         }
+
+        
         
         if (cmd.rfind("/upload ", 0) == 0) {
             istringstream iss(cmd);
@@ -178,6 +195,37 @@ void processCommand(ClientInfo& ci, const string& line) {
             return;
         }
     }
+
+    if (cmd.rfind("/download ", 0) == 0)
+{
+    string fname = cmd.substr(10);
+    fs::path fp = fs::path(FILE_DIR) / fname;
+    if (!fs::exists(fp))
+    {
+        sendAll(s, "ERROR: file not found\n", 21);
+        return;
+    }
+    uint64_t fsize = fs::file_size(fp);
+    ostringstream hdr;
+    hdr << "FILESIZE " << fsize << "\n";
+    string header = hdr.str();
+    if (!sendAll(s, header.c_str(), (int)header.size()))
+        return;
+    ifstream in(fp, ios::binary);
+    vector<char> buffer(BUFFER);
+    while (in)
+    {
+        in.read(buffer.data(), BUFFER);
+        streamsize r = in.gcount();
+        if (r > 0)
+        {
+            if (!sendAll(s, buffer.data(), (int)r))
+                return;
+        }
+    }
+    return;
+}
+
 
     if (!ci.isAdmin && cmd.rfind("/", 0) == 0) {
         sendAll(s, "ERROR: Admin privileges required\n", 33);
@@ -273,6 +321,66 @@ void clientThread(SOCKET clientSock, string clientIp, int clientPort)
     }
 }
 
+void logStatsPeriodically()
+{
+    while (running)
+    {
+        {
+            lock_guard<mutex> lock(clients_mtx);
+            ofstream f(LOG_FILE, ios::trunc);
+            f << "===== SERVER STATS =====\n";
+            auto t = chrono::system_clock::to_time_t(chrono::system_clock::now());
+            f << "Time: " << ctime(&t);
+            f << "Active connections: " << clients.size() << "\n";
+            uint64_t totalBytes = 0;
+            for (auto& c : clients) totalBytes += c.bytes;
+            f << "Total traffic (bytes): " << totalBytes << "\n";
+            f << "Client list:\n";
+            for (auto& c : clients)
+            {
+                f << c.ip << ":" << c.port
+                  << " admin=" << (c.isAdmin ? "yes" : "no")
+                  << " messages=" << c.messages
+                  << " bytes=" << c.bytes << "\n";
+            }
+        }
+        for (int i = 0; i < LOG_INTERVAL_SEC && running; ++i)
+            this_thread::sleep_for(chrono::seconds(1));
+    }
+}
+
+void consoleThread()
+{
+    string cmd;
+    while (running && getline(cin, cmd))
+    {
+        if (cmd == "STATS")
+        {
+            // show stats to console
+            lock_guard<mutex> lock(clients_mtx);
+            cout << "\n===== SERVER STATS =====\n";
+            cout << "Active connections: " << clients.size() << "\n";
+            uint64_t totalBytes = 0;
+            for (auto& c : clients) totalBytes += c.bytes;
+            cout << "Total traffic (bytes): " << totalBytes << "\n";
+            for (auto& c : clients)
+            {
+                cout << " - " << c.ip << ":" << c.port
+                     << " admin=" << (c.isAdmin ? "yes" : "no")
+                     << " messages=" << c.messages
+                     << " bytes=" << c.bytes << "\n";
+            }
+            cout << "========================\n";
+        }
+        else if (cmd == "EXIT")
+        {
+            running = false;
+            break;
+        }
+    }
+}
+
+
 int main()
 {
     if (!fs::exists(FILE_DIR))
@@ -315,6 +423,8 @@ int main()
     }
 
     cout << "Server listening on port " << PORT << "\n";
+    thread(logStatsPeriodically).detach();
+    thread(consoleThread).detach();
 
     while (running)
     {
