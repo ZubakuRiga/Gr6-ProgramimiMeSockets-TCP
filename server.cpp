@@ -37,7 +37,7 @@ struct ClientInfo
     string ip;
     int port;
     bool isAdmin;
-    int message = 0;
+    int messages = 0;
     uint64_t bytes = 0;
     steady_clock::time_point lastActive;
 };
@@ -83,7 +83,6 @@ void removeClient(SOCKET s)
     closesocket(s);
 }
 
-// read a single line terminated by \n
 bool recvLine(SOCKET s, string& out)
 {
     out.clear();
@@ -102,12 +101,11 @@ void processCommand(ClientInfo& ci, const string& line) {
     SOCKET s = ci.sock;
     string cmd = line;
     
-    // PERSONI 3: Pastro komandën
     while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r')) 
         cmd.pop_back();
     if (cmd.empty()) return;
 
-    // PERSONI 3: Komandat e adminit
+
     if (ci.isAdmin) {
         if (cmd == "STATS") {
             ostringstream oss;
@@ -181,13 +179,11 @@ void processCommand(ClientInfo& ci, const string& line) {
         }
     }
 
-    // PERSONI 3: Jo-admin duke provuar komandë admini
     if (!ci.isAdmin && cmd.rfind("/", 0) == 0) {
         sendAll(s, "ERROR: Admin privileges required\n", 33);
         return;
     }
 
-    // PERSONI 3: Transmetimi i mesazheve te të gjithë klientët
     string broadcastMsg = ci.ip + ":" + to_string(ci.port) + " says: " + cmd + "\n";
     lock_guard<mutex> lock(clients_mtx);
     for (auto& c : clients) {

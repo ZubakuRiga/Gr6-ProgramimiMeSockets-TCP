@@ -16,7 +16,6 @@ namespace fs = std::filesystem;
 const int BUFFER = 4096;
 atomic<bool> running(true);
 
-// send all helper
 bool sendAll(SOCKET s, const char *data, int len)
 {
     int sent = 0;
