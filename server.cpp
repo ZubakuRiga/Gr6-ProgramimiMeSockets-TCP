@@ -46,6 +46,18 @@ vector<ClientInfo> clients;
 mutex clients_mtx;
 atomic<bool> running(true);
 
+void showHelp() {
+    cout << "Komandat e disponueshme:\n";
+    cout << "/list - Listo të gjitha skedarët\n";
+    cout << "/read <filename> - Lexo një skedar\n";
+    cout << "/upload <filename> - Ngarko një skedar (admin)\n";
+    cout << "/download <filename> - Shkarko një skedar\n";
+    cout << "/delete <filename> - Fshij një skedar (admin)\n";
+    cout << "/search <keyword> - Kërko në skedarë\n";
+    cout << "/info <filename> - Shfaq informacion për skedar\n";
+    cout << "Shkruaj 'exit' për të dalë.\n";
+}
+
 bool sendAll(SOCKET s, const char *data, int len)
 {
     int sent = 0;
@@ -70,6 +82,121 @@ void removeClient(SOCKET s)
                   clients.end());
     closesocket(s);
 }
+
+// read a single line terminated by \n
+bool recvLine(SOCKET s, string& out)
+{
+    out.clear();
+    char ch;
+    while (true)
+    {
+        int n = recv(s, &ch, 1, 0);
+        if (n <= 0) return false;
+        out.push_back(ch);
+        if (ch == '\n') break;
+    }
+    return true;
+}
+
+void processCommand(ClientInfo& ci, const string& line) {
+    SOCKET s = ci.sock;
+    string cmd = line;
+    
+    // PERSONI 3: Pastro komandën
+    while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r')) 
+        cmd.pop_back();
+    if (cmd.empty()) return;
+
+    // PERSONI 3: Komandat e adminit
+    if (ci.isAdmin) {
+        if (cmd == "STATS") {
+            ostringstream oss;
+            oss << "Active: " << clients.size() << "\n";
+            for (auto& c : clients) {
+                oss << c.ip << ":" << c.port << " admin=" << (c.isAdmin ? "y" : "n")
+                    << " messages=" << c.messages << " bytes=" << c.bytes << "\n";
+            }
+            string out = oss.str();
+            sendAll(s, out.c_str(), (int)out.size());
+            return;
+        }
+        
+        if (cmd.rfind("/list", 0) == 0) {
+            string out;
+            for (auto& p : fs::directory_iterator(FILE_DIR)) 
+                out += p.path().filename().string() + "\n";
+            sendAll(s, out.c_str(), (int)out.size());
+            return;
+        }
+        
+        if (cmd.rfind("/read ", 0) == 0) {
+            string fname = cmd.substr(6);
+            fs::path fp = fs::path(FILE_DIR) / fname;
+            if (!fs::exists(fp)) { 
+                sendAll(s, "ERROR: file not found\n", 21); 
+                return; 
+            }
+            ifstream f(fp, ios::binary);
+            ostringstream buf; 
+            buf << f.rdbuf();
+            string data = buf.str();
+            sendAll(s, data.c_str(), (int)data.size());
+            return;
+        }
+        
+        if (cmd.rfind("/upload ", 0) == 0) {
+            istringstream iss(cmd);
+            string tag, fname; 
+            size_t size = 0;
+            iss >> tag >> fname >> size;
+            
+            if (fname.empty() || size == 0) { 
+                sendAll(s, "ERROR: invalid upload header\n", 29); 
+                return; 
+            }
+            
+            fs::path fp = fs::path(FILE_DIR) / fname;
+            ofstream out(fp, ios::binary);
+            size_t remaining = size;
+            const int BUF = 4096; 
+            vector<char> buffer(BUF);
+            
+            while (remaining > 0) {
+                int toRead = (int)min<size_t>(BUF, remaining);
+                int n = recv(s, buffer.data(), toRead, 0);
+                if (n <= 0) { 
+                    removeClient(s); 
+                    return; 
+                }
+                out.write(buffer.data(), n);
+                remaining -= n;
+                
+                lock_guard<mutex> lock(clients_mtx);
+                for (auto& c : clients) 
+                    if (c.sock == s) c.bytes += n;
+            }
+            out.close();
+            sendAll(s, "OK: upload complete\n", 20);
+            return;
+        }
+    }
+
+    // PERSONI 3: Jo-admin duke provuar komandë admini
+    if (!ci.isAdmin && cmd.rfind("/", 0) == 0) {
+        sendAll(s, "ERROR: Admin privileges required\n", 33);
+        return;
+    }
+
+    // PERSONI 3: Transmetimi i mesazheve te të gjithë klientët
+    string broadcastMsg = ci.ip + ":" + to_string(ci.port) + " says: " + cmd + "\n";
+    lock_guard<mutex> lock(clients_mtx);
+    for (auto& c : clients) {
+        if (c.sock != s) {
+            sendAll(c.sock, broadcastMsg.c_str(), (int)broadcastMsg.size());
+        }
+    }
+}
+
 void clientThread(SOCKET clientSock, string clientIp, int clientPort)
 {
     ClientInfo ci{clientSock, clientIp, clientPort, false, 0, 0, steady_clock::now()};
