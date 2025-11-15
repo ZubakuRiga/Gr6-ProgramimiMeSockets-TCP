@@ -1,10 +1,11 @@
 #define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 
-#include <WinSock2.h>
-#include <WS2tcpip.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 
+#include <functional>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -46,18 +47,6 @@ vector<ClientInfo> clients;
 mutex clients_mtx;
 atomic<bool> running(true);
 
-void showHelp() {
-    cout << "Komandat e disponueshme:\n";
-    cout << "/list - Listo të gjitha skedarët\n";
-    cout << "/read <filename> - Lexo një skedar\n";
-    cout << "/upload <filename> - Ngarko një skedar (admin)\n";
-    cout << "/download <filename> - Shkarko një skedar\n";
-    cout << "/delete <filename> - Fshij një skedar (admin)\n";
-    cout << "/search <keyword> - Kërko në skedarë\n";
-    cout << "/info <filename> - Shfaq informacion për skedar\n";
-    cout << "Shkruaj 'exit' për të dalë.\n";
-}
-
 bool sendAll(SOCKET s, const char *data, int len)
 {
     int sent = 0;
@@ -65,14 +54,11 @@ bool sendAll(SOCKET s, const char *data, int len)
     {
         int n = send(s, data + sent, len - sent, 0);
         if (n == SOCKET_ERROR || n == 0)
-        {
             return false;
-        }
         sent += n;
     }
     return true;
 }
-
 void removeClient(SOCKET s)
 {
     lock_guard<mutex> lock(clients_mtx);
@@ -83,10 +69,10 @@ void removeClient(SOCKET s)
     closesocket(s);
 }
 
-bool updateClientStats(SOCKET s, function<void(ClientInfo&)> updater, ClientInfo& outCopy)
+bool updateClientStats(SOCKET s, function<void(ClientInfo &)> updater, ClientInfo &outCopy)
 {
     lock_guard<mutex> lock(clients_mtx);
-    for (auto& c : clients)
+    for (auto &c : clients)
     {
         if (c.sock == s)
         {
@@ -98,147 +84,225 @@ bool updateClientStats(SOCKET s, function<void(ClientInfo&)> updater, ClientInfo
     return false;
 }
 
-bool recvLine(SOCKET s, string& out)
+bool recvLine(SOCKET s, string &out)
 {
     out.clear();
     char ch;
     while (true)
     {
         int n = recv(s, &ch, 1, 0);
-        if (n <= 0) return false;
+        if (n <= 0)
+            return false;
         out.push_back(ch);
-        if (ch == '\n') break;
+        if (ch == '\n')
+            break;
     }
     return true;
 }
 
-void processCommand(ClientInfo& ci, const string& line) {
+string listFiles()
+{
+    string out;
+    for (auto &p : fs::directory_iterator(FILE_DIR))
+        out += p.path().filename().string() + "\n";
+    if (out.empty())
+        out = "(empty)\n";
+    return out;
+}
+
+void processCommand(ClientInfo &ci, const string &line)
+{
     SOCKET s = ci.sock;
     string cmd = line;
-    
-    while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r')) 
+    while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r'))
         cmd.pop_back();
-    if (cmd.empty()) return;
+    if (cmd.empty())
+        return;
 
-
-    if (ci.isAdmin) {
-        if (cmd == "STATS") {
+    if (ci.isAdmin)
+    {
+        if (cmd == "STATS")
+        {
             ostringstream oss;
-            oss << "Active: " << clients.size() << "\n";
-            for (auto& c : clients) {
-                oss << c.ip << ":" << c.port << " admin=" << (c.isAdmin ? "y" : "n")
-                    << " messages=" << c.messages << " bytes=" << c.bytes << "\n";
+            lock_guard<mutex> lock(clients_mtx);
+            oss << "Active connections: " << clients.size() << "\n";
+            uint64_t totalBytes = 0;
+            for (auto &c : clients)
+                totalBytes += c.bytes;
+            oss << "Total traffic (bytes): " << totalBytes << "\n";
+            oss << "Client list:\n";
+            for (auto &c : clients)
+            {
+                oss << c.ip << ":" << c.port
+                    << " admin=" << (c.isAdmin ? "yes" : "no")
+                    << " messages=" << c.messages
+                    << " bytes=" << c.bytes << "\n";
             }
             string out = oss.str();
             sendAll(s, out.c_str(), (int)out.size());
             return;
         }
-        
-        if (cmd.rfind("/list", 0) == 0) {
-            string out;
-            for (auto& p : fs::directory_iterator(FILE_DIR)) 
-                out += p.path().filename().string() + "\n";
+
+        if (cmd.rfind("/list", 0) == 0)
+        {
+            string out = listFiles();
             sendAll(s, out.c_str(), (int)out.size());
             return;
         }
-        
-        if (cmd.rfind("/read ", 0) == 0) {
+
+        if (cmd.rfind("/read ", 0) == 0)
+        {
             string fname = cmd.substr(6);
             fs::path fp = fs::path(FILE_DIR) / fname;
-            if (!fs::exists(fp)) { 
-                sendAll(s, "ERROR: file not found\n", 21); 
-                return; 
+            if (!fs::exists(fp))
+            {
+                sendAll(s, "ERROR: file not found\n", 21);
+                return;
             }
             ifstream f(fp, ios::binary);
-            ostringstream buf; 
+            ostringstream buf;
             buf << f.rdbuf();
             string data = buf.str();
             sendAll(s, data.c_str(), (int)data.size());
             return;
         }
 
-        
-        
-        if (cmd.rfind("/upload ", 0) == 0) {
+        if (cmd.rfind("/upload ", 0) == 0)
+        {
             istringstream iss(cmd);
-            string tag, fname; 
+            string tag, fname;
             size_t size = 0;
             iss >> tag >> fname >> size;
-            
-            if (fname.empty() || size == 0) { 
-                sendAll(s, "ERROR: invalid upload header\n", 29); 
-                return; 
+            if (fname.empty() || size == 0)
+            {
+                sendAll(s, "ERROR: invalid upload header\n", 29);
+                return;
             }
-            
             fs::path fp = fs::path(FILE_DIR) / fname;
             ofstream out(fp, ios::binary);
             size_t remaining = size;
-            const int BUF = 4096; 
-            vector<char> buffer(BUF);
-            
-            while (remaining > 0) {
-                int toRead = (int)min<size_t>(BUF, remaining);
+            vector<char> buffer(BUFFER);
+            while (remaining > 0)
+            {
+                int toRead = (int)min<size_t>(BUFFER, remaining);
                 int n = recv(s, buffer.data(), toRead, 0);
-                if (n <= 0) { 
-                    removeClient(s); 
-                    return; 
+                if (n <= 0)
+                {
+                    removeClient(s);
+                    return;
                 }
                 out.write(buffer.data(), n);
                 remaining -= n;
-                
                 lock_guard<mutex> lock(clients_mtx);
-                for (auto& c : clients) 
-                    if (c.sock == s) c.bytes += n;
+                for (auto &c : clients)
+                    if (c.sock == s)
+                        c.bytes += n;
             }
             out.close();
             sendAll(s, "OK: upload complete\n", 20);
             return;
         }
-    }
 
-    if (cmd.rfind("/download ", 0) == 0)
-{
-    string fname = cmd.substr(10);
-    fs::path fp = fs::path(FILE_DIR) / fname;
-    if (!fs::exists(fp))
-    {
-        sendAll(s, "ERROR: file not found\n", 21);
-        return;
-    }
-    uint64_t fsize = fs::file_size(fp);
-    ostringstream hdr;
-    hdr << "FILESIZE " << fsize << "\n";
-    string header = hdr.str();
-    if (!sendAll(s, header.c_str(), (int)header.size()))
-        return;
-    ifstream in(fp, ios::binary);
-    vector<char> buffer(BUFFER);
-    while (in)
-    {
-        in.read(buffer.data(), BUFFER);
-        streamsize r = in.gcount();
-        if (r > 0)
+        if (cmd.rfind("/download ", 0) == 0)
         {
-            if (!sendAll(s, buffer.data(), (int)r))
+            string fname = cmd.substr(10);
+            fs::path fp = fs::path(FILE_DIR) / fname;
+            if (!fs::exists(fp))
+            {
+                sendAll(s, "ERROR: file not found\n", 21);
                 return;
+            }
+            uint64_t fsize = fs::file_size(fp);
+            ostringstream hdr;
+            hdr << "FILESIZE " << fsize << "\n";
+            string header = hdr.str();
+            if (!sendAll(s, header.c_str(), (int)header.size()))
+                return;
+            ifstream in(fp, ios::binary);
+            vector<char> buffer(BUFFER);
+            while (in)
+            {
+                in.read(buffer.data(), BUFFER);
+                streamsize r = in.gcount();
+                if (r > 0)
+                {
+                    if (!sendAll(s, buffer.data(), (int)r))
+                        return;
+                }
+            }
+            return;
+        }
+
+        if (cmd.rfind("/delete ", 0) == 0)
+        {
+            string fname = cmd.substr(8);
+            fs::path fp = fs::path(FILE_DIR) / fname;
+            if (!fs::exists(fp))
+            {
+                sendAll(s, "ERROR: file not found\n", 21);
+                return;
+            }
+            try
+            {
+                fs::remove(fp);
+                sendAll(s, "OK: file deleted\n", 17);
+            }
+            catch (...)
+            {
+                sendAll(s, "ERROR: could not delete file\n", 30);
+            }
+            return;
+        }
+
+        if (cmd.rfind("/search ", 0) == 0)
+        {
+            string keyword = cmd.substr(8);
+            string out;
+            for (auto &p : fs::directory_iterator(FILE_DIR))
+            {
+                string name = p.path().filename().string();
+                if (name.find(keyword) != string::npos)
+                    out += name + "\n";
+            }
+            if (out.empty())
+                out = "No matches found\n";
+            sendAll(s, out.c_str(), (int)out.size());
+            return;
+        }
+
+        if (cmd.rfind("/info ", 0) == 0)
+        {
+            string fname = cmd.substr(6);
+            fs::path fp = fs::path(FILE_DIR) / fname;
+            if (!fs::exists(fp))
+            {
+                sendAll(s, "ERROR: file not found\n", 21);
+                return;
+            }
+            uint64_t fsize = fs::file_size(fp);
+            auto ftime = fs::last_write_time(fp);
+            auto sctp = chrono::time_point_cast<chrono::system_clock::duration>(
+                ftime - fs::file_time_type::clock::now() + chrono::system_clock::now());
+            time_t modTime = chrono::system_clock::to_time_t(sctp);
+            ostringstream oss;
+            oss << "File: " << fname << "\nSize: " << fsize << " bytes\nLast modified: " << ctime(&modTime);
+            string info = oss.str();
+            sendAll(s, info.c_str(), (int)info.size());
+            return;
         }
     }
-    return;
-}
 
-
-    if (!ci.isAdmin && cmd.rfind("/", 0) == 0) {
+    if (!ci.isAdmin && cmd.rfind("/", 0) == 0)
+    {
         sendAll(s, "ERROR: Admin privileges required\n", 33);
         return;
     }
 
-    string broadcastMsg = ci.ip + ":" + to_string(ci.port) + " says: " + cmd + "\n";
+    string b = ci.ip + ":" + to_string(ci.port) + " says: " + cmd + "\n";
     lock_guard<mutex> lock(clients_mtx);
-    for (auto& c : clients) {
-        if (c.sock != s) {
-            sendAll(c.sock, broadcastMsg.c_str(), (int)broadcastMsg.size());
-        }
-    }
+    for (auto &c : clients)
+        if (c.sock != s)
+            sendAll(c.sock, b.c_str(), (int)b.size());
 }
 
 void clientThread(SOCKET clientSock, string clientIp, int clientPort)
@@ -286,6 +350,7 @@ void clientThread(SOCKET clientSock, string clientIp, int clientPort)
                 return;
             }
         }
+
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(clientSock, &readfds);
@@ -298,12 +363,14 @@ void clientThread(SOCKET clientSock, string clientIp, int clientPort)
         }
         if (rv == 0)
             continue;
+
         string line;
         if (!recvLine(clientSock, line))
         {
             removeClient(clientSock);
             return;
         }
+
         {
             lock_guard<mutex> lock(clients_mtx);
             for (auto &c : clients)
@@ -333,10 +400,11 @@ void logStatsPeriodically()
             f << "Time: " << ctime(&t);
             f << "Active connections: " << clients.size() << "\n";
             uint64_t totalBytes = 0;
-            for (auto& c : clients) totalBytes += c.bytes;
+            for (auto &c : clients)
+                totalBytes += c.bytes;
             f << "Total traffic (bytes): " << totalBytes << "\n";
             f << "Client list:\n";
-            for (auto& c : clients)
+            for (auto &c : clients)
             {
                 f << c.ip << ":" << c.port
                   << " admin=" << (c.isAdmin ? "yes" : "no")
@@ -356,14 +424,14 @@ void consoleThread()
     {
         if (cmd == "STATS")
         {
-            // show stats to console
             lock_guard<mutex> lock(clients_mtx);
             cout << "\n===== SERVER STATS =====\n";
             cout << "Active connections: " << clients.size() << "\n";
             uint64_t totalBytes = 0;
-            for (auto& c : clients) totalBytes += c.bytes;
+            for (auto &c : clients)
+                totalBytes += c.bytes;
             cout << "Total traffic (bytes): " << totalBytes << "\n";
-            for (auto& c : clients)
+            for (auto &c : clients)
             {
                 cout << " - " << c.ip << ":" << c.port
                      << " admin=" << (c.isAdmin ? "yes" : "no")
@@ -380,11 +448,10 @@ void consoleThread()
     }
 }
 
-
 int main()
 {
     if (!fs::exists(FILE_DIR))
-        fs::create_directories(FILE_DIR);
+        fs::create_directory(FILE_DIR);
 
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
@@ -413,7 +480,6 @@ int main()
         WSACleanup();
         return 1;
     }
-
     if (listen(listenSock, SOMAXCONN) == SOCKET_ERROR)
     {
         cerr << "Listen failed\n";
@@ -432,9 +498,8 @@ int main()
         int addrsize = sizeof(clientInfo);
         SOCKET clientSock = accept(listenSock, (SOCKADDR *)&clientInfo, &addrsize);
         if (clientSock == INVALID_SOCKET)
-        {
             continue;
-        }
+
         string cliIp = inet_ntoa(clientInfo.sin_addr);
         int cliPort = ntohs(clientInfo.sin_port);
 
@@ -450,9 +515,9 @@ int main()
         }
 
         cout << "New connection from " << cliIp << ":" << cliPort << "\n";
-        showHelp();
+        thread(clientThread, clientSock, cliIp, cliPort).detach();
     }
-    
+
     closesocket(listenSock);
     WSACleanup();
     return 0;

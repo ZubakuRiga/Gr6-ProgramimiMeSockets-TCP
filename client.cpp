@@ -28,6 +28,7 @@ bool sendAll(SOCKET s, const char *data, int len)
     }
     return true;
 }
+
 void recvLoop(SOCKET s, bool isAdmin)
 {
     char buf[BUFFER];
@@ -159,7 +160,6 @@ int main()
         cout << "> ";
         string line;
         getline(cin, line);
-
         if (!running)
             break;
         if (line.empty())
@@ -227,7 +227,11 @@ int main()
         }
 
         string msg = line + "\n";
-        sendAll(sock, msg.c_str(), (int)msg.size());
+        if (!sendAll(sock, msg.c_str(), (int)msg.size()))
+            break;
+
+        if (!isAdmin)
+            this_thread::sleep_for(chrono::milliseconds(300));
     }
 
     running = false;

@@ -1,5 +1,8 @@
 {
     "files.associations": {
-        "string": "cpp"
+        "*.embeddedhtml": "html",
+        "string": "cpp",
+        "vector": "cpp",
+        "filesystem": "cpp"
     }
 }
